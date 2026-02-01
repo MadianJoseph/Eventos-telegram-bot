@@ -135,5 +135,5 @@ def home():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=bot_loop).start()
+    threading.Thread(target=bot_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
