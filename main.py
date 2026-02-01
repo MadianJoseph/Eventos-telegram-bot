@@ -97,10 +97,15 @@ def bot_loop():
 
                 # LOGIN
                 page.goto(URL_LOGIN)
-                page.fill("input[type='text']", USER)
-                page.fill("input[type='password']", PASSWORD)
-                page.click("button[type='submit']")
-                page.wait_for_timeout(3000)
+
+page.wait_for_load_state("networkidle")
+
+page.get_by_placeholder("Usuario").fill(USER)
+page.get_by_placeholder("Contraseña").fill(PASSWORD)
+
+page.get_by_role("button", name="Iniciar sesión").click()
+
+page.wait_for_timeout(4000)
 
                 # IR A EVENTOS
                 page.goto(URL_EVENTS)
