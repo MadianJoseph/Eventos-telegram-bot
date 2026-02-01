@@ -50,12 +50,13 @@ def check_page():
 # ================== TELEGRAM COMMANDS ==================
 def telegram_commands():
     offset = -1
-print("🤖 Escuchando comandos de Telegram...")
+    print("🤖 Escuchando comandos de Telegram...")
 
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
         params = {"timeout": 100, "offset": offset}
         r = requests.get(url, params=params, timeout=120).json()
+        
 
         for update in r.get("result", []):
             offset = update["update_id"] + 1
