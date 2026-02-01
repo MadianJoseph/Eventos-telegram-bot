@@ -1,87 +1,134 @@
 import time
 import requests
-from bs4 import BeautifulSoup
-from flask import Flask
 import threading
 import os
+from datetime import datetime, timedelta
+import pytz
 
-# ================== CONFIG ==================
-URL = "https://eventossistema.com.mx/confirmaciones/default.html"
-CHECK_INTERVAL = 45  # segundos
+from flask import Flask
+from playwright.sync_api import sync_playwright
+
+# ================= CONFIG =================
+URL_LOGIN = "https://eventossistema.com.mx/login.html"
+URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
+
+CHECK_INTERVAL = 30
+
+TZ = pytz.timezone("America/Mexico_City")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-paused = False
-last_content = None
+USER = os.getenv("WEB_USER")
+PASSWORD = os.getenv("WEB_PASS")
+
+IMPORTANT_PLACES = [
+    "ESTADIO GNP",
+    "PALACIO DE LOS DEPORTES",
+    "AUTODROMO HERMANOS RODRIGUEZ",
+    "ESTADIO HARP HELU",
+]
 
 app = Flask(__name__)
+last_events = set()
 
-# ================== TELEGRAM ==================
-def send_telegram(msg):
+
+# ================= TELEGRAM =================
+def send(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg}
-    requests.post(url, data=data, timeout=10)
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-# ================== CHECK PAGE ==================
-def check_page():
-    global last_content, paused
 
-    send_telegram("🤖 Bot activo en Render")
+# ================= HORARIO =================
+def working_hours():
+    now = datetime.now(TZ)
+    return 6 <= now.hour < 24
 
-    while True:
-        if not paused:
+
+# ================= FORMATEAR EVENTO =================
+def format_event(text):
+    lines = text.upper()
+
+    important = any(p in lines for p in IMPORTANT_PLACES)
+    far = "GIRA" in lines
+
+    date_line = next((l for l in text.split("\n") if "/" in l), "")
+    cancel_msg = ""
+
+    try:
+        event_date = datetime.strptime(date_line[:10], "%d/%m/%Y")
+        days = (event_date.date() - datetime.now().date()).days
+        if days >= 4:
+            cancel_msg = "✅ Se puede cancelar\n"
+    except:
+        pass
+
+    header = ""
+    if important:
+        header = "🔥 IMPORTANTE - CERCA\n"
+    elif far:
+        header = "⚠️ POSIBLE GIRA / LEJOS\n"
+
+    return f"🚨 ¡NUEVO EVENTO DISPONIBLE!\n\n{header}{cancel_msg}{text}"
+
+
+# ================= PLAYWRIGHT =================
+def bot_loop():
+    send("🤖 Bot iniciado correctamente")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        while True:
             try:
-                r = requests.get(URL, timeout=20)
-                soup = BeautifulSoup(r.text, "html.parser")
+                now = datetime.now(TZ)
 
-                section = soup.get_text()
+                # mensajes diarios
+                if now.hour == 6 and now.minute == 0:
+                    send("🌅 Iniciando monitoreo del día")
 
-                if last_content and section != last_content:
-                    send_telegram("🚨 ¡CAMBIO DETECTADO!\nHay un nuevo evento disponible.")
-                
-                last_content = section
+                if now.hour == 0 and now.minute == 0:
+                    send("🌙 Bot desactivado por horario")
+
+                if not working_hours():
+                    time.sleep(60)
+                    continue
+
+                # LOGIN
+                page.goto(URL_LOGIN)
+                page.fill("input[type='text']", USER)
+                page.fill("input[type='password']", PASSWORD)
+                page.click("button[type='submit']")
+                page.wait_for_timeout(3000)
+
+                # IR A EVENTOS
+                page.goto(URL_EVENTS)
+                page.wait_for_timeout(3000)
+
+                content = page.inner_text("body")
+
+                events = content.split("EVENTOS DISPONIBLES")
+
+                if len(events) > 1:
+                    raw = events[1].strip()
+
+                    if raw not in last_events:
+                        last_events.add(raw)
+                        send(format_event(raw))
 
             except Exception as e:
-                send_telegram(f"⚠️ Error al revisar página:\n{e}")
+                send(f"⚠️ Error: {e}")
 
-        time.sleep(CHECK_INTERVAL)
+            time.sleep(CHECK_INTERVAL)
 
-# ================== TELEGRAM COMMANDS ==================
-def telegram_commands():
-    offset = -1
-    print("🤖 Escuchando comandos de Telegram...")
 
-    while True:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        params = {"timeout": 100, "offset": offset}
-        r = requests.get(url, params=params, timeout=120).json()
-        
-
-        for update in r.get("result", []):
-            offset = update["update_id"] + 1
-            text = update.get("message", {}).get("text", "")
-
-            if text == "/status":
-                send_telegram("✅ Bot activo" if not paused else "⏸ Bot en pausa")
-
-            elif text == "/pause":
-                paused = True
-                send_telegram("⏸ Bot pausado")
-
-            elif text == "/resume":
-                paused = False
-                send_telegram("▶️ Bot reanudado")
-
-            elif text == "/test":
-                send_telegram("🧪 Mensaje de prueba correcto")
-
-# ================== FLASK ==================
+# ================= FLASK =================
 @app.route("/")
 def home():
     return "Bot activo"
 
+
 if __name__ == "__main__":
-    threading.Thread(target=check_page).start()
-    threading.Thread(target=telegram_commands).start()
+    threading.Thread(target=bot_loop).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
