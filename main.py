@@ -96,17 +96,16 @@ def bot_loop():
                     continue
 
                 # LOGIN
-                page.goto(URL_LOGIN)
 
-page.wait_for_load_state("networkidle")
+                page.goto(URL_EVENTS)
+                page.wait_for_load_state("networkidle")
 
-page.get_by_placeholder("Usuario").fill(USER)
-page.get_by_placeholder("Contraseña").fill(PASSWORD)
+                page.get_by_placeholder("Usuario").fill(USER)
+                page.get_by_placeholder("Contraseña").fill(PASSWORD)
 
-page.get_by_role("button", name="Iniciar sesión").click()
+                page.get_by_role("button", name="Iniciar sesión").click()
 
-page.wait_for_timeout(4000)
-
+                page.wait_for_timeout(4000)
                 # IR A EVENTOS
                 page.goto(URL_EVENTS)
                 page.wait_for_timeout(3000)
