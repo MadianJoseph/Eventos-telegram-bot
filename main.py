@@ -117,7 +117,7 @@ def bot_loop():
                 if len(events) > 1:
                     raw = events[1].strip()
 
-                    if raw not in last_events:
+                    if true:
                         last_events.add(raw)
                         send(format_event(raw))
 
