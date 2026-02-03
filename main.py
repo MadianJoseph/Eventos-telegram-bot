@@ -12,7 +12,8 @@ from playwright.sync_api import sync_playwright
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
-CHECK_INTERVAL = 300 # 5 minutos
+# CAMBIO: 60 segundos para que sea cada minuto
+CHECK_INTERVAL = 60 
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
@@ -27,7 +28,8 @@ def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+        # Añadimos parse_mode Markdown por si quieres usar negritas
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
 def working_hours():
@@ -35,17 +37,17 @@ def working_hours():
     return 6 <= now.hour < 24
 
 def clean_event_text(text):
-    # Lógica de recorte mejorada
     resultado = text
     if "EVENTOS CONFIRMADOS" in text:
         resultado = text.split("EVENTOS CONFIRMADOS")[0]
     
     if "EVENTOS DISPONIBLES" in resultado:
         parts = resultado.split("EVENTOS DISPONIBLES")
-        resultado = "🚨 **NUEVOS EVENTOS** 🚨\n" + parts[-1]
+        resultado = "*🚨 NUEVOS EVENTOS DETECTADOS 🚨*\n" + parts[-1]
     
-    # Si el resultado es muy corto, devolvemos el original para no perder info
-    return resultado.strip() if len(resultado.strip()) > 10 else text[:500]
+    # Añadimos la hora para confirmar que es un reporte nuevo
+    hora_actual = datetime.now(TZ).strftime("%H:%M:%S")
+    return f"{resultado.strip()}\n\n🕒 _Actualizado: {hora_actual}_"
 
 # ================= BOT LOOP =================
 def bot_loop():
@@ -61,61 +63,53 @@ def bot_loop():
         page = context.new_page()
         logged = False
 
-        send("🤖 Bot Reiniciado: Iniciando ciclo de monitoreo...")
-
         while True:
             try:
                 if not working_hours():
-                    time.sleep(60)
+                    time.sleep(30)
                     continue
 
                 if not logged:
-                    page.goto(URL_LOGIN, wait_until="networkidle", timeout=60000)
-                    page.wait_for_timeout(3000)
+                    page.goto(URL_LOGIN, wait_until="networkidle")
+                    page.wait_for_timeout(4000)
                     
-                    # Login
                     page.keyboard.press("Tab")
                     page.keyboard.type(USER, delay=100)
                     page.keyboard.press("Tab")
                     page.keyboard.type(PASSWORD, delay=100)
                     page.keyboard.press("Enter")
                     
-                    # Esperar cambio de página
                     page.wait_for_timeout(10000)
                     logged = True
-                    send("🔑 Sesión iniciada correctamente.")
 
                 # --- MONITOREO ---
                 page.goto(URL_EVENTS, wait_until="domcontentloaded")
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                # Verificación de expulsión
+                # Si el sitio nos sacó al login
                 if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
                     logged = False
                     continue
 
-                if NO_EVENTS_TEXT in content:
-                    # Opcional: Descomenta la siguiente línea si quieres que te avise que NO hay nada
-                    # send("pasa nada") 
-                    pass
-                elif len(content.strip()) > 50:
+                # Si NO está el texto de "no hay eventos", significa que hay algo
+                if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
                     mensaje = clean_event_text(content)
                     send(mensaje)
-                
-                # Para depuración: imprimimos en consola de Render
-                print(f"[{datetime.now(TZ)}] Ciclo completado sin eventos nuevos.")
+                else:
+                    # Opcional: imprimir en consola de Render para saber que revisó
+                    print(f"[{datetime.now(TZ)}] Revisión: Sin eventos nuevos.")
 
             except Exception as e:
-                print(f"Error detectado: {e}")
-                # Si hay error, cerramos contexto para limpiar memoria
+                print(f"Error: {e}")
                 logged = False
-                time.sleep(60)
+                time.sleep(20)
 
+            # Espera exacta de 60 segundos
             time.sleep(CHECK_INTERVAL)
 
 @app.route("/")
-def home(): return "Bot Online"
+def home(): return "Bot Online - Reportando cada 60s"
 
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
