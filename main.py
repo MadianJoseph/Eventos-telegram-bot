@@ -13,7 +13,7 @@ URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
 # CAMBIO: 60 segundos para que sea cada minuto
-CHECK_INTERVAL = 60 
+CHECK_INTERVAL = 90 
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
