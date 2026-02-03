@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
-CHECK_INTERVAL = 60 # Revisar cada minuto
+CHECK_INTERVAL = 300 # Recomendado 5 min para evitar bloqueos
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
@@ -34,16 +34,12 @@ def working_hours():
     now = datetime.now(TZ)
     return 6 <= now.hour < 24
 
-# Nueva función para recortar el texto y que solo veas lo nuevo
 def clean_event_text(text):
-    # Buscamos dónde empieza la parte que NO queremos ver
     if "EVENTOS CONFIRMADOS" in text:
         text = text.split("EVENTOS CONFIRMADOS")[0]
-    
-    # Limpiamos un poco el saludo y el porcentaje para ir al grano
     if "EVENTOS DISPONIBLES" in text:
-        text = "🚨 **EVENTOS DISPONIBLES** 🚨\n" + text.split("EVENTOS DISPONIBLES")[-1]
-    
+        parts = text.split("EVENTOS DISPONIBLES")
+        text = "🚨 **EVENTOS DISPONIBLES** 🚨\n" + parts[-1]
     return text.strip()
 
 # ================= BOT LOOP =================
@@ -68,45 +64,49 @@ def bot_loop():
                     continue
 
                 if not logged:
-                    page.goto(URL_LOGIN, wait_until="commit")
+                    page.goto(URL_LOGIN, wait_until="networkidle")
                     page.wait_for_timeout(5000)
                     
-                    # Simulación de escritura
+                    # Limpiamos campos antes de escribir
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Backspace")
+                    
+                    # Escribimos con delay para parecer humanos
+                    page.keyboard.type(USER, delay=150)
                     page.keyboard.press("Tab")
-                    page.keyboard.type(USER, delay=100)
-                    page.keyboard.press("Tab")
-                    page.keyboard.type(PASSWORD, delay=100)
+                    page.keyboard.type(PASSWORD, delay=150)
                     page.keyboard.press("Enter")
                     
-                    page.wait_for_timeout(10000)
+                    # ESPERA CRÍTICA: Dejamos que el sistema procese el login
+                    page.wait_for_url("**/default.html", timeout=20000) 
+                    send("✅ Login verificado. Entrando al panel...")
                     logged = True
 
                 # --- MONITOREO ---
-                page.goto(URL_EVENTS, wait_until="commit")
+                page.goto(URL_EVENTS, wait_until="domcontentloaded")
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                # Verificar si se cerró la sesión
-                if "INICIAR SESIÓN" in content.upper() or "LOGIN" in content.upper():
+                # Si detecta palabras de login, es que nos sacó
+                if "INGRESE SUS CREDENCIALES" in content.upper() or "ID USUARIO" in content.upper():
                     logged = False
                     continue
 
-                # Lógica de detección
                 if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
                     mensaje_limpio = clean_event_text(content)
-                    send(mensaje_limpio)
+                    # Solo enviamos si el mensaje contiene algo más que el título
+                    if len(mensaje_limpio) > 40:
+                        send(mensaje_limpio)
                 
-                # Si quieres que avise CADA MINUTO, el sleep debe ser igual al CHECK_INTERVAL
-                # Nota: Si prefieres que descanse un poco más, sube este número.
                 time.sleep(CHECK_INTERVAL)
 
             except Exception as e:
-                print(f"Error: {e}")
-                logged = False
+                print(f"Reintentando por error: {e}")
+                logged = False # Forzamos re-login en caso de cualquier error
                 time.sleep(30)
 
 @app.route("/")
-def home(): return "Bot Online - Monitoreando Eventos"
+def home(): return "Bot Online"
 
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
