@@ -141,7 +141,9 @@ def home():
 
 
 if __name__ == "__main__":
-    # iniciar flask primero
-    threading.Thread(target=bot_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=False, use_reloader=False)
-    
+    def start_bot():
+        threading.Thread(target=bot_loop, daemon=True).start()
+
+    threading.Timer(3, start_bot).start()
+
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), use_reloader=False)
