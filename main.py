@@ -14,7 +14,6 @@ URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
 CHECK_INTERVAL = 60 
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
-
 TZ = pytz.timezone("America/Mexico_City")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,17 +21,9 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USER = os.getenv("WEB_USER")
 PASSWORD = os.getenv("WEB_PASS")
 
-IMPORTANT_PLACES = [
-    "ESTADIO GNP",
-    "PALACIO DE LOS DEPORTES",
-    "AUTODROMO HERMANOS RODRIGUEZ",
-    "ESTADIO HARP HELU",
-]
+IMPORTANT_PLACES = ["ESTADIO GNP", "PALACIO DE LOS DEPORTES", "AUTODROMO HERMANOS RODRIGUEZ", "ESTADIO HARP HELU"]
 
 app = Flask(__name__)
-
-sent_today_start = False
-sent_today_stop = False
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -45,88 +36,73 @@ def working_hours():
     now = datetime.now(TZ)
     return 6 <= now.hour < 24
 
-def format_event(text):
-    upper = text.upper()
-    header = ""
-    if any(p in upper for p in IMPORTANT_PLACES):
-        header += "🔥 IMPORTANTE / CERCA\n"
-    if "GIRA" in upper:
-        header += "⚠️ POSIBLE GIRA / LEJOS\n"
-    return f"🚨 ¡HAY EVENTOS DISPONIBLES!\n\n{header}{text}"
-
 # ================= BOT LOOP =================
 def bot_loop():
-    global sent_today_start, sent_today_stop
-
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"]
         )
         
+        # Forzamos un viewport real para evitar bloqueos
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 720}
         )
         page = context.new_page()
-        # Aumentamos el timeout global a 90 segundos
-        page.set_default_timeout(90000)
+        page.set_default_timeout(60000) # 60 segundos máximo
         logged = False
 
         while True:
             try:
-                now = datetime.now(TZ)
-
-                if now.hour == 6 and not sent_today_start:
-                    send("🌅 Bot activado. Iniciando monitoreo.")
-                    sent_today_start, sent_today_stop = True, False
-
-                if now.hour == 0 and not sent_today_stop:
-                    send("🌙 Bot dormido hasta las 6am.")
-                    sent_today_stop, sent_today_start = True, False
-
                 if not working_hours():
                     time.sleep(60)
                     continue
 
                 if not logged:
-                    send("🔐 Intentando iniciar sesión (espera extendida)...")
+                    send("🔐 Paso 1: Cargando página de login...")
                     try:
-                        # Usamos 'domcontentloaded' para que sea más rápido y menos propenso a timeouts
-                        page.goto(URL_LOGIN, wait_until="domcontentloaded")
-                        
+                        # 'commit' es la forma más rápida de avanzar
+                        page.goto(URL_LOGIN, wait_until="commit")
+                        page.wait_for_timeout(5000) # Espera manual de seguridad
+
+                        send("🔐 Paso 2: Llenando credenciales...")
                         page.get_by_placeholder("Usuario").fill(USER)
                         page.get_by_placeholder("Contraseña").fill(PASSWORD)
                         
-                        # Clic y esperar a que cambie la URL
+                        send("🔐 Paso 3: Clic en Iniciar Sesión...")
                         page.get_by_role("button", name="Iniciar sesión").click()
+                        
+                        # Esperamos a ver si cambia la URL o aparece un error
                         page.wait_for_timeout(10000) 
 
-                        if page.url == URL_LOGIN:
-                            send("❌ Login fallido. Revisa credenciales.")
-                            time.sleep(120) 
+                        if URL_LOGIN in page.url:
+                            # Intentamos ver si hay un mensaje de error visible en la página
+                            send("❌ Error: Login rechazado (posible usuario/pass incorrecto).")
+                            time.sleep(180)
                             continue
 
-                        page.goto(URL_EVENTS, wait_until="domcontentloaded")
-                        send("✅ Sesión iniciada con éxito.")
+                        send("✅ Sesión exitosa. Accediendo a eventos...")
+                        page.goto(URL_EVENTS, wait_until="commit")
                         logged = True
-                    except Exception as login_err:
-                        print(f"Error login: {login_err}")
+                    except Exception as e:
+                        send(f"⚠️ Error en proceso de login: {str(e)[:100]}")
                         time.sleep(30)
                         continue
 
                 # MONITOREO
-                page.reload(wait_until="domcontentloaded")
+                page.reload(wait_until="commit")
                 page.wait_for_timeout(5000)
-
                 content = page.inner_text("body")
 
-                if "INICIAR SESIÓN" in content.upper():
+                if "INICIAR SESIÓN" in content.upper() or "LOGIN" in content.upper():
+                    send("🔄 Sesión perdida. Reconectando...")
                     logged = False
                     continue
 
                 if NO_EVENTS_TEXT not in content and len(content.strip()) > 30:
-                    send(format_event(content[:1200]))
-                    time.sleep(300) 
+                    send(f"🚨 ¡EVENTOS!:\n\n{content[:1000]}")
+                    time.sleep(600) # Pausa larga si detecta algo
 
             except Exception as e:
                 print(f"Error: {e}")
@@ -143,4 +119,4 @@ if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
-                        
+    
