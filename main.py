@@ -17,7 +17,7 @@ NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 
 TZ = pytz.timezone("America/Mexico_City")
 
-# Variables de entorno extraídas de la configuración de Render
+# [span_0](start_span)Variables de entorno de Render[span_0](end_span)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USER = os.getenv("WEB_USER")
@@ -65,16 +65,15 @@ def format_event(text):
 def bot_loop():
     global sent_today_start, sent_today_stop
 
-    # Se agregan argumentos necesarios para entornos Linux/Docker en la nube
     with sync_playwright() as p:
+        # Lanzamiento optimizado para Render
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"]
         )
         
-        # Se añade un User Agent real para evitar ser detectado como bot
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         page = context.new_page()
         logged = False
@@ -83,7 +82,7 @@ def bot_loop():
             try:
                 now = datetime.now(TZ)
 
-                # Mensajes diarios de estado
+                # Control de mensajes diarios
                 if now.hour == 6 and not sent_today_start:
                     send("🌅 Bot activado. Iniciando monitoreo.")
                     sent_today_start = True
@@ -98,57 +97,72 @@ def bot_loop():
                     time.sleep(60)
                     continue
 
-                # LOGIN
+                # ================= PROCESO DE LOGIN =================
                 if not logged:
                     send("🔐 Intentando iniciar sesión...")
-                    page.goto(URL_LOGIN, wait_until="networkidle")
+                    try:
+                        page.goto(URL_LOGIN, wait_until="networkidle", timeout=60000)
 
-                    page.get_by_placeholder("Usuario").fill(USER)
-                    page.get_by_placeholder("Contraseña").fill(PASSWORD)
-                    page.get_by_role("button", name="Iniciar sesión").click()
+                        page.get_by_placeholder("Usuario").fill(USER)
+                        page.get_by_placeholder("Contraseña").fill(PASSWORD)
+                        
+                        # Clic y espera de navegación
+                        page.get_by_role("button", name="Iniciar sesión").click()
+                        page.wait_for_timeout(8000) 
 
-                    page.wait_for_timeout(5000) # Espera a que cargue el dashboard
-                    page.goto(URL_EVENTS, wait_until="networkidle")
-                    logged = True
+                        # Verificación de éxito de login
+                        if page.url == URL_LOGIN:
+                            send("❌ Error: Login fallido. Revisa credenciales en Render.")
+                            time.sleep(300) 
+                            continue
 
-                # REFRESH Y MONITOREO
+                        page.goto(URL_EVENTS, wait_until="networkidle")
+                        send("✅ Sesión iniciada. Monitoreando eventos...")
+                        logged = True
+                    except Exception as login_err:
+                        send(f"⚠️ Error en login: {str(login_err)[:100]}")
+                        logged = False
+                        time.sleep(60)
+                        continue
+
+                # ================= MONITOREO =================
                 page.reload(wait_until="networkidle")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(4000)
 
                 content = page.inner_text("body")
 
-                # Verificar si la sesión expiró
+                # Sesión expirada
                 if "INICIAR SESIÓN" in content.upper() or "LOGIN" in content.upper():
-                    send("🔄 Sesión expirada. Reintentando login...")
+                    send("🔄 Sesión expirada. Reintentando...")
                     logged = False
                     continue
 
-                # Analizar contenido de eventos
-                if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
-                    # Filtramos para que no mande mensajes vacíos o errores cortos
-                    send(format_event(content[:1000])) # Limitamos caracteres para Telegram
+                # Detección de eventos
+                if NO_EVENTS_TEXT not in content and len(content.strip()) > 30:
+                    send(format_event(content[:1200]))
+                    # Espera más larga si hay eventos para no saturar Telegram
+                    time.sleep(300) 
 
             except Exception as e:
-                print(f"Error en el bucle: {e}")
-                # No enviamos mensaje a Telegram por cada error para evitar spam si falla el internet
+                print(f"Error en bucle: {e}")
                 logged = False
-                time.sleep(10)
+                time.sleep(20)
 
             time.sleep(CHECK_INTERVAL)
 
 # ================= FLASK =================
 @app.route("/")
 def home():
-    return "Bot de Eventos: Ejecutándose correctamente."
+    return "Bot de Eventos: Online"
 
 if __name__ == "__main__":
-    # Inicia el bot en un hilo separado para que Flask pueda responder a Render
     def start_bot():
         bot_loop()
 
+    # Hilo secundario para el bot
     threading.Thread(target=start_bot, daemon=True).start()
 
-    # Render usa la variable de entorno PORT
+    # Puerto dinámico de Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
-    
+                
