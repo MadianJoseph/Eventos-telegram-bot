@@ -8,11 +8,13 @@ import pytz
 from flask import Flask
 from playwright.sync_api import sync_playwright
 
+
 # ================= CONFIG =================
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
-CHECK_INTERVAL = 60 # Cambiado a 60 segundos por seguridad
+CHECK_INTERVAL = 60  # refresco cada 60s
+NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 
 TZ = pytz.timezone("America/Mexico_City")
 
@@ -22,6 +24,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USER = os.getenv("WEB_USER")
 PASSWORD = os.getenv("WEB_PASS")
 
+
 IMPORTANT_PLACES = [
     "ESTADIO GNP",
     "PALACIO DE LOS DEPORTES",
@@ -29,125 +32,115 @@ IMPORTANT_PLACES = [
     "ESTADIO HARP HELU",
 ]
 
+
 app = Flask(__name__)
-last_events = set()
+
+sent_today_start = False
+sent_today_stop = False
+
 
 # ================= TELEGRAM =================
 def send(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-    except Exception as e:
-        print(f"Error enviando a Telegram: {e}")
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+
 
 # ================= HORARIO =================
 def working_hours():
     now = datetime.now(TZ)
     return 6 <= now.hour < 24
 
-# ================= FORMATEAR EVENTO =================
+
+# ================= FORMATEAR =================
 def format_event(text):
-    lines = text.upper()
-    important = any(p in lines for p in IMPORTANT_PLACES)
-    far = "GIRA" in lines
-
-    date_line = next((l for l in text.split("\n") if "/" in l), "")
-    cancel_msg = ""
-
-    try:
-        event_date = datetime.strptime(date_line[:10], "%d/%m/%Y")
-        days = (event_date.date() - datetime.now(TZ).date()).days
-        if days >= 4:
-            cancel_msg = "✅ Se puede cancelar\n"
-    except:
-        pass
+    upper = text.upper()
 
     header = ""
-    if important:
-        header = "🔥 IMPORTANTE - CERCA\n"
-    elif far:
-        header = "⚠️ POSIBLE GIRA / LEJOS\n"
 
-    return f"🚨 ¡NUEVO EVENTO DISPONIBLE!\n\n{header}{cancel_msg}{text}"
+    if any(p in upper for p in IMPORTANT_PLACES):
+        header += "🔥 IMPORTANTE / CERCA\n"
 
-# ================= FUNCIÓN DE LOGIN =================
-def do_login(page):
-    print("Iniciando sesión...")
-    page.goto(URL_LOGIN)
-    page.wait_for_load_state("networkidle")
-    page.get_by_placeholder("Usuario").fill(USER)
-    page.get_by_placeholder("Contraseña").fill(PASSWORD)
-    page.get_by_role("button", name="Iniciar sesión").click()
-    page.wait_for_timeout(5000) # Espera a que redireccione
+    if "GIRA" in upper:
+        header += "⚠️ POSIBLE GIRA / LEJOS\n"
 
-# ================= PLAYWRIGHT BOT =================
+    return f"🚨 ¡HAY EVENTOS DISPONIBLES!\n\n{header}{text}"
+
+
+# ================= BOT LOOP =================
 def bot_loop():
-    send("🤖 Bot iniciado y monitoreando (Modo Optimizado)")
+    global sent_today_start, sent_today_stop
 
     with sync_playwright() as p:
-        # Importante: Chromium en modo headless para Render
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        page = context.new_page()
+        page = browser.new_page()
 
-        # Login inicial
-        try:
-            do_login(page)
-        except Exception as e:
-            send(f"⚠️ Error en login inicial: {e}")
+        logged = False
 
         while True:
+            now = datetime.now(TZ)
+
+            # ===== mensajes diarios =====
+            if now.hour == 6 and not sent_today_start:
+                send("🌅 Bot activado. Iniciando monitoreo.")
+                sent_today_start = True
+                sent_today_stop = False
+
+            if now.hour == 0 and not sent_today_stop:
+                send("🌙 Bot dormido hasta las 6am.")
+                sent_today_stop = True
+                sent_today_start = False
+
+            if not working_hours():
+                time.sleep(60)
+                continue
+
             try:
-                now = datetime.now(TZ)
+                # ================= LOGIN SOLO SI ES NECESARIO =================
+                if not logged:
+                    send("🔐 Iniciando sesión...")
 
-                # Mensajes de estado diarios
-                if now.hour == 6 and now.minute == 0:
-                    send("🌅 Iniciando monitoreo del día")
-                if now.hour == 0 and now.minute == 0:
-                    send("🌙 Bot desactivado por horario (Duerme)")
+                    page.goto(URL_LOGIN)
+                    page.wait_for_load_state("networkidle")
 
-                if not working_hours():
-                    time.sleep(60)
-                    continue
+                    page.get_by_placeholder("Usuario").fill(USER)
+                    page.get_by_placeholder("Contraseña").fill(PASSWORD)
+                    page.get_by_role("button", name="Iniciar sesión").click()
 
-                # Ir a la página de eventos directamente
-                page.goto(URL_EVENTS)
-                page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(4000)
 
-                # RE-LOGIN AUTOMÁTICO: Si la página nos regresó al login o pide usuario
-                if page.get_by_placeholder("Usuario").is_visible():
-                    print("Sesión cerrada. Re-logueando...")
-                    do_login(page)
                     page.goto(URL_EVENTS)
+                    logged = True
 
+                # ================= REFRESH =================
+                page.reload()
                 page.wait_for_timeout(3000)
+
                 content = page.inner_text("body")
 
-                if "EVENTOS DISPONIBLES" in content:
-                    events = content.split("EVENTOS DISPONIBLES")
-                    raw = events[1].strip()
+                # ================= SESIÓN EXPIRADA =================
+                if "INICIAR SESIÓN" in content.upper():
+                    send("🔄 Sesión expirada. Reintentando login...")
+                    logged = False
+                    continue
 
-                    # Solo si hay texto después de "EVENTOS DISPONIBLES"
-                    if raw and raw not in last_events:
-                        last_events.add(raw)
-                        send(format_event(raw))
-                
+                # ================= EVENTOS =================
+                if NO_EVENTS_TEXT not in content:
+                    send(format_event(content))
+
             except Exception as e:
-                print(f"Error en el loop: {e}")
-                # No enviamos error a Telegram cada 60s para no hacer spam si cae el sitio
-                # Solo si es un error crítico podrías habilitarlo
+                send(f"⚠️ Error: {e}")
+                logged = False
 
             time.sleep(CHECK_INTERVAL)
 
-# ================= FLASK =================
+
+# ================= FLASK (Render necesita puerto abierto) =================
 @app.route("/")
 def home():
-    return "Bot activo y funcionando"
+    return "Bot activo"
+
 
 if __name__ == "__main__":
-    # Hilo secundario para el bot
     threading.Thread(target=bot_loop, daemon=True).start()
-    # Puerto dinámico para Render
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-                    
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    
