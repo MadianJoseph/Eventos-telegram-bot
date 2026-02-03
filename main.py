@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
-CHECK_INTERVAL = 300 # Recomendado 5 min para evitar bloqueos
+CHECK_INTERVAL = 300 # 5 minutos
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
@@ -35,12 +35,17 @@ def working_hours():
     return 6 <= now.hour < 24
 
 def clean_event_text(text):
+    # Lógica de recorte mejorada
+    resultado = text
     if "EVENTOS CONFIRMADOS" in text:
-        text = text.split("EVENTOS CONFIRMADOS")[0]
-    if "EVENTOS DISPONIBLES" in text:
-        parts = text.split("EVENTOS DISPONIBLES")
-        text = "🚨 **EVENTOS DISPONIBLES** 🚨\n" + parts[-1]
-    return text.strip()
+        resultado = text.split("EVENTOS CONFIRMADOS")[0]
+    
+    if "EVENTOS DISPONIBLES" in resultado:
+        parts = resultado.split("EVENTOS DISPONIBLES")
+        resultado = "🚨 **NUEVOS EVENTOS** 🚨\n" + parts[-1]
+    
+    # Si el resultado es muy corto, devolvemos el original para no perder info
+    return resultado.strip() if len(resultado.strip()) > 10 else text[:500]
 
 # ================= BOT LOOP =================
 def bot_loop():
@@ -54,8 +59,9 @@ def bot_loop():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         page = context.new_page()
-        page.set_default_timeout(80000)
         logged = False
+
+        send("🤖 Bot Reiniciado: Iniciando ciclo de monitoreo...")
 
         while True:
             try:
@@ -64,46 +70,49 @@ def bot_loop():
                     continue
 
                 if not logged:
-                    page.goto(URL_LOGIN, wait_until="networkidle")
-                    page.wait_for_timeout(5000)
+                    page.goto(URL_LOGIN, wait_until="networkidle", timeout=60000)
+                    page.wait_for_timeout(3000)
                     
-                    # Limpiamos campos antes de escribir
-                    page.keyboard.press("Control+A")
-                    page.keyboard.press("Backspace")
-                    
-                    # Escribimos con delay para parecer humanos
-                    page.keyboard.type(USER, delay=150)
+                    # Login
                     page.keyboard.press("Tab")
-                    page.keyboard.type(PASSWORD, delay=150)
+                    page.keyboard.type(USER, delay=100)
+                    page.keyboard.press("Tab")
+                    page.keyboard.type(PASSWORD, delay=100)
                     page.keyboard.press("Enter")
                     
-                    # ESPERA CRÍTICA: Dejamos que el sistema procese el login
-                    page.wait_for_url("**/default.html", timeout=20000) 
-                    send("✅ Login verificado. Entrando al panel...")
+                    # Esperar cambio de página
+                    page.wait_for_timeout(10000)
                     logged = True
+                    send("🔑 Sesión iniciada correctamente.")
 
                 # --- MONITOREO ---
                 page.goto(URL_EVENTS, wait_until="domcontentloaded")
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                # Si detecta palabras de login, es que nos sacó
-                if "INGRESE SUS CREDENCIALES" in content.upper() or "ID USUARIO" in content.upper():
+                # Verificación de expulsión
+                if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
                     logged = False
                     continue
 
-                if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
-                    mensaje_limpio = clean_event_text(content)
-                    # Solo enviamos si el mensaje contiene algo más que el título
-                    if len(mensaje_limpio) > 40:
-                        send(mensaje_limpio)
+                if NO_EVENTS_TEXT in content:
+                    # Opcional: Descomenta la siguiente línea si quieres que te avise que NO hay nada
+                    # send("pasa nada") 
+                    pass
+                elif len(content.strip()) > 50:
+                    mensaje = clean_event_text(content)
+                    send(mensaje)
                 
-                time.sleep(CHECK_INTERVAL)
+                # Para depuración: imprimimos en consola de Render
+                print(f"[{datetime.now(TZ)}] Ciclo completado sin eventos nuevos.")
 
             except Exception as e:
-                print(f"Reintentando por error: {e}")
-                logged = False # Forzamos re-login en caso de cualquier error
-                time.sleep(30)
+                print(f"Error detectado: {e}")
+                # Si hay error, cerramos contexto para limpiar memoria
+                logged = False
+                time.sleep(60)
+
+            time.sleep(CHECK_INTERVAL)
 
 @app.route("/")
 def home(): return "Bot Online"
