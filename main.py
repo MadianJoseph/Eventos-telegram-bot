@@ -12,45 +12,46 @@ from playwright.sync_api import sync_playwright
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 
-# CAMBIO: 60 segundos para que sea cada minuto
-CHECK_INTERVAL = 90 
+CHECK_INTERVAL = 90  # 1:30 minutos
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
+# Variables de entorno - Cuenta 1
+USER_1 = os.getenv("WEB_USER")
+PASS_1 = os.getenv("WEB_PASS")
+
+# Variables de entorno - Cuenta 2
+USER_2 = os.getenv("WEB_USER_2")
+PASS_2 = os.getenv("WEB_PASS_2")
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-USER = os.getenv("WEB_USER")
-PASSWORD = os.getenv("WEB_PASS")
 
 app = Flask(__name__)
 
+# ================= FUNCIONES AUXILIARES =================
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        # Añadimos parse_mode Markdown por si quieres usar negritas
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def working_hours():
-    now = datetime.now(TZ)
-    return 6 <= now.hour < 24
-
-def clean_event_text(text):
+def clean_event_text(text, user_label):
     resultado = text
     if "EVENTOS CONFIRMADOS" in text:
         resultado = text.split("EVENTOS CONFIRMADOS")[0]
     
     if "EVENTOS DISPONIBLES" in resultado:
         parts = resultado.split("EVENTOS DISPONIBLES")
-        resultado = "*🚨 NUEVOS EVENTOS DETECTADOS 🚨*\n" + parts[-1]
+        resultado = f"*🚨 EVENTOS PARA: {user_label} 🚨*\n" + parts[-1]
     
-    # Añadimos la hora para confirmar que es un reporte nuevo
     hora_actual = datetime.now(TZ).strftime("%H:%M:%S")
     return f"{resultado.strip()}\n\n🕒 _Actualizado: {hora_actual}_"
 
-# ================= BOT LOOP =================
-def bot_loop():
+# ================= LÓGICA DEL MONITOR (PARA CUALQUIER CUENTA) =================
+def monitor_account(username, password, label):
+    """Función que ejecuta el monitoreo para una cuenta específica"""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -65,18 +66,21 @@ def bot_loop():
 
         while True:
             try:
-                if not working_hours():
-                    time.sleep(30)
+                # Verificar horario (6am a 12am)
+                now = datetime.now(TZ)
+                if not (6 <= now.hour < 24):
+                    time.sleep(60)
                     continue
 
                 if not logged:
                     page.goto(URL_LOGIN, wait_until="networkidle")
-                    page.wait_for_timeout(4000)
+                    page.wait_for_timeout(3000)
                     
+                    # Proceso de Login
                     page.keyboard.press("Tab")
-                    page.keyboard.type(USER, delay=100)
+                    page.keyboard.type(username, delay=100)
                     page.keyboard.press("Tab")
-                    page.keyboard.type(PASSWORD, delay=100)
+                    page.keyboard.type(password, delay=100)
                     page.keyboard.press("Enter")
                     
                     page.wait_for_timeout(10000)
@@ -87,32 +91,39 @@ def bot_loop():
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                # Si el sitio nos sacó al login
+                # Detectar si sacó de la sesión
                 if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
                     logged = False
                     continue
 
-                # Si NO está el texto de "no hay eventos", significa que hay algo
+                # Analizar eventos
                 if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
-                    mensaje = clean_event_text(content)
+                    mensaje = clean_event_text(content, label)
                     send(mensaje)
                 else:
-                    # Opcional: imprimir en consola de Render para saber que revisó
-                    print(f"[{datetime.now(TZ)}] Revisión: Sin eventos nuevos.")
+                    print(f"[{datetime.now(TZ)}] Cuenta {label}: Sin novedades.")
 
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error en cuenta {label}: {e}")
                 logged = False
-                time.sleep(20)
+                time.sleep(30)
 
-            # Espera exacta de 60 segundos
             time.sleep(CHECK_INTERVAL)
 
+# ================= FLASK Y HILOS =================
 @app.route("/")
-def home(): return "Bot Online - Reportando cada 60s"
+def home():
+    return "Bot Dual Online - Monitoreando 2 cuentas."
 
 if __name__ == "__main__":
-    threading.Thread(target=bot_loop, daemon=True).start()
+    # Iniciar monitoreo para la Cuenta 1
+    if USER_1 and PASS_1:
+        threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "CUENTA 1"), daemon=True).start()
+    
+    # Iniciar monitoreo para la Cuenta 2
+    if USER_2 and PASS_2:
+        threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "CUENTA 2"), daemon=True).start()
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
     
