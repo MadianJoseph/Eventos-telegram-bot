@@ -118,11 +118,11 @@ def home():
 if __name__ == "__main__":
     # Iniciar monitoreo para la Cuenta 1
     if USER_1 and PASS_1:
-        threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "CUENTA 1"), daemon=True).start()
+        threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "MADIAN"), daemon=True).start()
     
     # Iniciar monitoreo para la Cuenta 2
     if USER_2 and PASS_2:
-        threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "CUENTA 2"), daemon=True).start()
+        threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "SAYURI"), daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
