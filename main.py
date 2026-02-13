@@ -1,46 +1,43 @@
-import time, re, requests, pytz
+import time, re, requests, pytz, os
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
-# === CONFIGURACIÓN MADIAN ===
-USER = "TU_USUARIO_MADIAN"
-PASS = "TU_PASSWORD_MADIAN"
-TOKEN = "TU_TELEGRAM_TOKEN"
-CHAT_ID = "TU_CHAT_ID"
+# === CONFIGURACIÓN MADIAN (RENDER ENV) ===
+USER = os.getenv("WEB_USER")
+PASS = os.getenv("WEB_PASS")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 URL_LOGIN = "https://eventossistema.com.mx/login/default.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 TZ = pytz.timezone("America/Mexico_City")
 
-# Listas de Filtros
+# Filtros de Listas
 LUGARES_OK = ["PALACIO DE LOS DEPORTES", "ESTADIO GNP", "AUTODROMO HERMANOS RODRIGUEZ", "ESTADIO ALFREDO HARP HELU", "DIABLOS"]
 PUESTOS_SI = ["SEGURIDAD", "SEGURIDAD PLUS", "PLUS", "BOLETAJE", "RESGUARDO", "STAFF", "ACOMODADOR", "LOCAL CREW"]
-PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID", "MODULOS", "TAQUILLA", "CASHLESS", "CCTV", "ACOMODADORA"]
+PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID", "MODULOS", "TAQUILLA", "CASHLESS", "CCTV", "ACOMODADORA", "PLUS"] 
 TOP_EVENTS = ["ACDC", "SYSTEM OF A DOWN", "BTS"]
 
 def send(msg):
+    if not TOKEN or not CHAT_ID: return
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
                       data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-    except: print("Error enviando a Telegram")
+    except: pass
 
 def extraer_datos(html):
-    """Analiza la estructura de la tabla desplegada"""
     d = {"lugar": "", "puesto": "", "turnos": "0", "inicio": "", "fin": ""}
     try:
         lugar = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html, re.I)
         d['lugar'] = lugar.group(1).strip().upper() if lugar else ""
-        
         puesto = re.search(r'PUESTO</td><td.*?>(.*?)</td>', html, re.I)
         d['puesto'] = puesto.group(1).strip().upper() if puesto else ""
-        
         turnos = re.search(r'TURNOS:?\s*([\d.]+)', html, re.I)
         d['turnos'] = turnos.group(1).strip() if turnos else "0"
-        
         horario = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2}) AL (\d{2}/\d{2}/\d{4} \d{2}:\d{2})', html)
         if horario:
             d['inicio'], d['fin'] = horario.group(1), horario.group(2)
-    except Exception as e: print(f"Error parseo: {e}")
+    except: pass
     return d
 
 def analizar_madian(d, titulo, es_bloque):
@@ -48,92 +45,91 @@ def analizar_madian(d, titulo, es_bloque):
     titulo_u = titulo.upper()
     todo_texto = (titulo_u + " " + d['puesto']).upper()
 
-    # 1. TRASLADO / GIRA / BLOQUE
+    # 1. TRASLADO / GIRA / BLOQUE (Solo avisar)
     if any(x in titulo_u for x in ["TRASLADO", "GIRA"]) or es_bloque:
-        return False, "⚠️ Traslado/Gira/Bloque (Manual)"
+        return False, "⚠️ TRASLADO/GIRA/BLOQUE detectado"
 
-    # 2. EVENTOS TOP (Ignora otros filtros)
+    # 2. EVENTOS TOP (ACDC, SOAD, BTS)
     if any(top in titulo_u for top in TOP_EVENTS):
         return True, "🔥 EVENTO TOP MADIAN 🔥"
 
-    # 3. FILTRO DE LUGAR (Prioridad 1)
+    # 3. FILTRO DE LUGAR
     if not any(l in d['lugar'] for l in LUGARES_OK):
         return False, f"📍 Lugar no permitido: {d['lugar']}"
 
     # 4. FILTRO DE PUESTOS
     if any(p in todo_texto for p in PUESTOS_NO):
-        return False, f"🚫 Puesto prohibido: {todo_texto}"
+        return False, f"🚫 Puesto excluido: {todo_texto}"
     
-    # 5. REGLA 84 HORAS (72h + 12h)
+    # 5. REGLA 84 HORAS (72h + 12h de margen)
     try:
         inicio_dt = TZ.localize(datetime.strptime(d['inicio'], "%d/%m/%Y %H:%M"))
         if ahora > (inicio_dt - timedelta(hours=84)):
-            return False, "⏳ Plazo menor a 84h"
-    except: return False, "❌ Error en fecha"
+            return False, "⏳ Menos de 84h para el evento"
+    except: return False, "❌ Error en formato de fecha"
 
-    # 6. REGLA DOMINGO
-    if inicio_dt.weekday() == 6: # Domingo
+    # 6. REGLA DOMINGO (No antes 9:30 AM)
+    if inicio_dt.weekday() == 6: 
         if inicio_dt.hour < 9 or (inicio_dt.hour == 9 and inicio_dt.minute < 30):
-            return False, "😴 Domingo antes de las 9:30 AM"
+            return False, "😴 Domingo horario no permitido (< 9:30 AM)"
 
-    # 7. REGLA NOCTURNA
+    # 7. REGLA NOCTURNA (No entrar >= 17:00)
     if inicio_dt.hour >= 17:
-        return False, "🌙 Entrada Nocturna (>17:00)"
+        return False, "🌙 Horario Nocturno (Entrada >= 17:00)"
 
-    # 8. TURNOS
+    # 8. TURNOS (Máximo 1.5)
     if float(d['turnos']) > 1.5:
-        return False, f"⚖️ Excede 1.5 turnos ({d['turnos']})"
+        return False, f"⚖️ Turnos exceden 1.5 ({d['turnos']})"
 
-    return True, "✅ Apto para confirmar"
+    return True, "✅ CUMPLE TODOS LOS FILTROS"
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        
-        # LOGIN
-        page.goto(URL_LOGIN)
-        page.fill('input[name="usuario"]', USER)
-        page.fill('input[name="password"]', PASS)
-        page.click('button[type="submit"]')
-        page.wait_for_timeout(5000)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        try:
+            page.goto(URL_LOGIN)
+            page.fill('input[name="usuario"]', USER)
+            page.fill('input[name="password"]', PASS)
+            page.click('button[type="submit"]')
+            page.wait_for_timeout(5000)
 
-        while True:
-            try:
+            while True:
                 page.goto(URL_EVENTS, wait_until="networkidle")
-                div_disponibles = page.query_selector("#div_eventos_disponibles")
+                cont = page.query_selector("#div_eventos_disponibles")
                 
-                if div_disponibles and "No hay eventos" not in div_disponibles.inner_text():
-                    cards = div_disponibles.query_selector_all(".card")
+                if cont and "No hay eventos" not in cont.inner_text():
+                    cards = cont.query_selector_all(".card")
+                    # Priorizar por horario (el que salga más temprano)
                     for card in cards:
                         link = card.query_selector("h6 a")
                         if not link: continue
                         
                         titulo = link.inner_text().strip()
-                        link.click() # ABRIR ESTRUCTURA
+                        link.click() 
                         page.wait_for_timeout(1500)
                         
                         info = extraer_datos(card.inner_html())
                         es_bloque = "BLOQUE" in card.inner_text().upper()
                         
                         apto, motivo = analizar_madian(info, titulo, es_bloque)
-                        btn_confirmar = card.query_selector("button:has-text('CONFIRMAR')")
+                        btn = card.query_selector("button:has-text('CONFIRMAR')")
 
-                        if apto and btn_confirmar:
-                            btn_confirmar.click()
+                        if apto and btn:
+                            btn.click()
                             page.wait_for_timeout(2000)
                             if "EVENTO LLENO" in page.content().upper():
-                                send(f"❌ *LLENO:* {titulo}\nNo se pudo confirmar.")
+                                send(f"❌ MADIAN: EVENTO LLENO\n🎫 {titulo}")
                             else:
-                                send(f"✅ *CONFIRMADO:* {titulo}\n📍 {info['lugar']}\n⏳ {info['turnos']} turnos")
+                                send(f"✅ MADIAN: CONFIRMADO EXITOSAMENTE\n🎫 {titulo}\n📍 {info['lugar']}\n⏳ {info['turnos']} turnos\n⏰ {info['inicio']}")
                         else:
-                            send(f"📋 *NUEVOS DATOS:* {titulo}\n❌ *ESTADO:* {motivo}\n📍 Lugar: {info['lugar']}\n⏳ Turnos: {info['turnos']}")
-
+                            send(f"📋 MADIAN (DISPONIBLE): {titulo}\n❌ MOTIVO: {motivo}\n📍 Lugar: {info['lugar']}\n⏰ Inicio: {info['inicio']}")
+                
                 time.sleep(90)
-            except Exception as e:
-                print(f"Error: {e}")
-                time.sleep(10)
+                page.reload()
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
     run()
