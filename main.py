@@ -1,154 +1,129 @@
-import time, re, requests, pytz, os, threading
-from datetime import datetime, timedelta
+import time
+import requests
+import threading
+import os
+from datetime import datetime
+import pytz
+
 from flask import Flask
 from playwright.sync_api import sync_playwright
 
-# --- SERVIDOR PARA RENDER (EVITA ERROR DE PUERTOS) ---
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "Bot de Madian en ejecución...", 200
-
-# --- CONFIGURACIÓN DESDE VARIABLES DE ENTORNO ---
-USER = os.getenv("WEB_USER")
-PASS = os.getenv("WEB_PASS")
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-URL_LOGIN = "https://eventossistema.com.mx/login/default.html"
+# ================= CONFIG =================
+URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
+
+CHECK_INTERVAL = 90  # 1:30 minutos
+NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
-# Filtros Listas
-LUGARES_OK = ["PALACIO DE LOS DEPORTES", "ESTADIO GNP", "AUTODROMO HERMANOS RODRIGUEZ", "ESTADIO ALFREDO HARP HELU", "DIABLOS"]
-PUESTOS_NO = ["ACREDITACIONES", "ANFITRION", "MKT", "OVG", "FAN ID", "MODULOS", "TAQUILLA", "CASHLESS", "CCTV", "ACOMODADORA"]
-TOP_EVENTS = ["ACDC", "SYSTEM OF A DOWN", "BTS"]
+# Variables de entorno - Cuenta 1
+USER_1 = os.getenv("WEB_USER")
+PASS_1 = os.getenv("WEB_PASS")
 
+# Variables de entorno - Cuenta 2
+USER_2 = os.getenv("WEB_USER_2")
+PASS_2 = os.getenv("WEB_PASS_2")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+app = Flask(__name__)
+
+# ================= FUNCIONES AUXILIARES =================
 def send(msg):
-    if not TOKEN or not CHAT_ID: return
+    if not TELEGRAM_TOKEN or not CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                      data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
     except: pass
 
-def extraer_datos_tabla(card_element):
-    """Extrae datos de la tabla interna una vez desplegada"""
-    d = {"lugar": "", "puesto": "", "turnos": "0", "inicio": "", "fin": ""}
-    try:
-        html = card_element.inner_html()
-        # Buscar Puesto
-        puesto_match = re.search(r'PUESTO</td><td.*?>(.*?)</td>', html, re.I)
-        d['puesto'] = puesto_match.group(1).strip().upper() if puesto_match else ""
-        
-        # Buscar Lugar
-        lugar_match = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html, re.I)
-        d['lugar'] = lugar_match.group(1).strip().upper() if lugar_match else ""
-        
-        # Buscar Horario y Turnos (Estructura: 15/02/2026 08:30 AL 15/02/2026 20:30, TURNOS: 1.5)
-        horario_completo = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2}) AL (\d{2}/\d{2}/\d{4} \d{2}:\d{2}), TURNOS:\s*([\d.]+)', html)
-        if horario_completo:
-            d['inicio'] = horario_completo.group(1)
-            d['fin'] = horario_completo.group(2)
-            d['turnos'] = horario_completo.group(3)
-    except Exception as e:
-        print(f"Error extrayendo tabla: {e}")
-    return d
-
-def analizar_madian(d, titulo, es_bloque):
-    ahora = datetime.now(TZ)
-    titulo_u = titulo.upper()
-    todo_texto = (titulo_u + " " + d['puesto']).upper()
-
-    if any(x in titulo_u for x in ["TRASLADO", "GIRA"]) or es_bloque:
-        return False, "⚠️ TRASLADO/GIRA/BLOQUE"
-
-    if any(top in titulo_u for top in TOP_EVENTS):
-        return True, "🔥 EVENTO TOP 🔥"
-
-    if not any(l in d['lugar'] for l in LUGARES_OK):
-        return False, f"📍 Lugar: {d['lugar']}"
-
-    if any(p in todo_texto for p in PUESTOS_NO):
-        return False, "🚫 Puesto prohibido"
+def clean_event_text(text, user_label):
+    resultado = text
+    if "EVENTOS CONFIRMADOS" in text:
+        resultado = text.split("EVENTOS CONFIRMADOS")[0]
     
-    try:
-        inicio_dt = TZ.localize(datetime.strptime(d['inicio'], "%d/%m/%Y %H:%M"))
-        # Regla 84 horas (72h + 12h gracia)
-        if ahora > (inicio_dt - timedelta(hours=84)):
-            return False, "⏳ Menos de 84h"
-    except: return False, "❌ Error en fecha"
+    if "EVENTOS DISPONIBLES" in resultado:
+        parts = resultado.split("EVENTOS DISPONIBLES")
+        resultado = f"*🚨 EVENTOS PARA: {user_label} 🚨*\n" + parts[-1]
+    
+    hora_actual = datetime.now(TZ).strftime("%H:%M:%S")
+    return f"{resultado.strip()}\n\n🕒 _Actualizado: {hora_actual}_"
 
-    # Reglas Madian: Domingo y Noche
-    if inicio_dt.weekday() == 6: 
-        if inicio_dt.hour < 9 or (inicio_dt.hour == 9 and inicio_dt.minute < 30):
-            return False, "😴 Domingo temprano"
-
-    if inicio_dt.hour >= 17:
-        return False, "🌙 Nocturno (Entrada >= 17:00)"
-
-    if float(d['turnos']) > 1.5:
-        return False, f"⚖️ Turnos: {d['turnos']}"
-
-    return True, "✅ Filtros cumplidos"
-
-def bot_worker():
+# ================= LÓGICA DEL MONITOR (PARA CUALQUIER CUENTA) =================
+def monitor_account(username, password, label):
+    """Función que ejecuta el monitoreo para una cuenta específica"""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        context = browser.new_context()
-        page = context.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"]
+        )
         
-        try:
-            page.goto(URL_LOGIN)
-            page.fill('input[name="usuario"]', USER)
-            page.fill('input[name="password"]', PASS)
-            page.click('button[type="submit"]')
-            page.wait_for_timeout(5000)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
+        logged = False
 
-            while True:
-                page.goto(URL_EVENTS, wait_until="networkidle")
-                # FOCO SOLO EN DISPONIBLES
-                container = page.query_selector("#div_eventos_disponibles")
-                
-                if container and "No hay eventos" not in container.inner_text():
-                    cards = container.query_selector_all(".card.mb-2")
-                    for card in cards:
-                        link = card.query_selector("a[data-bs-toggle='collapse']")
-                        if not link: continue
-                        
-                        titulo = link.inner_text().split('\n')[0].strip()
-                        # Si está colapsado, dar clic para ver detalles
-                        if "collapsed" in link.get_attribute("class"):
-                            link.click()
-                            page.wait_for_timeout(1000)
-                        
-                        info = extraer_datos_tabla(card)
-                        es_bloque = "BLOQUE" in card.inner_text().upper()
-                        
-                        apto, motivo = analizar_madian(info, titulo, es_bloque)
-                        btn_confirmar = card.query_selector("button:has-text('CONFIRMAR')")
+        while True:
+            try:
+                # Verificar horario (6am a 12am)
+                now = datetime.now(TZ)
+                if not (6 <= now.hour < 24):
+                    time.sleep(60)
+                    continue
 
-                        if apto and btn_confirmar:
-                            btn_confirmar.click()
-                            page.wait_for_timeout(2000)
-                            # Verificar si salió el modal de lleno
-                            if page.locator("text=EVENTO LLENO").is_visible():
-                                send(f"❌ *LLENO:* {titulo}")
-                            else:
-                                send(f"✅ *CONFIRMADO:* {titulo}\n📍 {info['lugar']}\n⏳ {info['turnos']} turnos")
-                        else:
-                            # Notificar aunque no se confirme
-                            send(f"📋 *NUEVO EVENTO:* {titulo}\n❌ *ESTADO:* {motivo}\n📍 Lugar: {info['lugar']}\n⏳ Turnos: {info['turnos']}")
-                
-                time.sleep(90)
-                page.reload()
-        except Exception as e:
-            print(f"Error en el bot: {e}")
-            time.sleep(30)
+                if not logged:
+                    page.goto(URL_LOGIN, wait_until="networkidle")
+                    page.wait_for_timeout(3000)
+                    
+                    # Proceso de Login
+                    page.keyboard.press("Tab")
+                    page.keyboard.type(username, delay=100)
+                    page.keyboard.press("Tab")
+                    page.keyboard.type(password, delay=100)
+                    page.keyboard.press("Enter")
+                    
+                    page.wait_for_timeout(10000)
+                    logged = True
+
+                # --- MONITOREO ---
+                page.goto(URL_EVENTS, wait_until="domcontentloaded")
+                page.wait_for_timeout(5000)
+                content = page.inner_text("body")
+
+                # Detectar si sacó de la sesión
+                if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
+                    logged = False
+                    continue
+
+                # Analizar eventos
+                if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
+                    mensaje = clean_event_text(content, label)
+                    send(mensaje)
+                else:
+                    print(f"[{datetime.now(TZ)}] Cuenta {label}: Sin novedades.")
+
+            except Exception as e:
+                print(f"Error en cuenta {label}: {e}")
+                logged = False
+                time.sleep(30)
+
+            time.sleep(CHECK_INTERVAL)
+
+# ================= FLASK Y HILOS =================
+@app.route("/")
+def home():
+    return "Bot Dual Online - Monitoreando 2 cuentas."
 
 if __name__ == "__main__":
-    # Hilo para el bot
-    threading.Thread(target=bot_worker, daemon=True).start()
-    # Servidor Flask para Render
+    # Iniciar monitoreo para la Cuenta 1
+    if USER_1 and PASS_1:
+        threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "CUENTA 1"), daemon=True).start()
+    
+    # Iniciar monitoreo para la Cuenta 2
+    if USER_2 and PASS_2:
+        threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "CUENTA 2"), daemon=True).start()
+
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    
