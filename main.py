@@ -16,11 +16,9 @@ CHECK_INTERVAL = 90  # 1:30 minutos
 NO_EVENTS_TEXT = "No hay eventos disponibles por el momento."
 TZ = pytz.timezone("America/Mexico_City")
 
-# Variables de entorno - Cuenta 1
+# Variables de entorno
 USER_1 = os.getenv("WEB_USER")
 PASS_1 = os.getenv("WEB_PASS")
-
-# Variables de entorno - Cuenta 2
 USER_2 = os.getenv("WEB_USER_2")
 PASS_2 = os.getenv("WEB_PASS_2")
 
@@ -49,13 +47,14 @@ def clean_event_text(text, user_label):
     hora_actual = datetime.now(TZ).strftime("%H:%M:%S")
     return f"{resultado.strip()}\n\n🕒 _Actualizado: {hora_actual}_"
 
-# ================= LÓGICA DEL MONITOR (PARA CUALQUIER CUENTA) =================
+# ================= LÓGICA DEL MONITOR =================
 def monitor_account(username, password, label):
-    """Función que ejecuta el monitoreo para una cuenta específica"""
+    """Monitoreo continuo 24/7"""
     with sync_playwright() as p:
+        # Lanzamos el navegador con argumentos para estabilidad
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"]
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
         
         context = browser.new_context(
@@ -66,13 +65,11 @@ def monitor_account(username, password, label):
 
         while True:
             try:
-                # Verificar horario (6am a 12am)
-                now = datetime.now(TZ)
-                if not (6 <= now.hour < 24):
-                    time.sleep(60)
-                    continue
+                # --- CAMBIO CLAVE: Se eliminó el "if (6 <= now.hour < 24)" ---
+                # Ahora el código siempre intentará revisar la página.
 
                 if not logged:
+                    print(f"[{datetime.now(TZ)}] {label}: Iniciando sesión...")
                     page.goto(URL_LOGIN, wait_until="networkidle")
                     page.wait_for_timeout(3000)
                     
@@ -91,8 +88,9 @@ def monitor_account(username, password, label):
                 page.wait_for_timeout(5000)
                 content = page.inner_text("body")
 
-                # Detectar si sacó de la sesión
+                # Detectar si sacó de la sesión (ej. timeout del servidor)
                 if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
+                    print(f"[{datetime.now(TZ)}] {label}: Sesión expirada, re-logueando...")
                     logged = False
                     continue
 
@@ -100,30 +98,29 @@ def monitor_account(username, password, label):
                 if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
                     mensaje = clean_event_text(content, label)
                     send(mensaje)
+                    # Dormimos un poco extra para evitar spam si hay un evento activo
+                    time.sleep(300) 
                 else:
-                    print(f"[{datetime.now(TZ)}] Cuenta {label}: Sin novedades.")
+                    print(f"[{datetime.now(TZ)}] {label}: Sin novedades.")
 
             except Exception as e:
-                print(f"Error en cuenta {label}: {e}")
+                print(f"Error en {label}: {e}")
                 logged = False
-                time.sleep(30)
+                time.sleep(30) # Espera antes de reintentar tras un error
 
             time.sleep(CHECK_INTERVAL)
 
 # ================= FLASK Y HILOS =================
 @app.route("/")
 def home():
-    return "Bot Dual Online - Monitoreando 2 cuentas."
+    return f"Bot Dual Online - {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}"
 
 if __name__ == "__main__":
-    # Iniciar monitoreo para la Cuenta 1
     if USER_1 and PASS_1:
         threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "CUENTA 1"), daemon=True).start()
     
-    # Iniciar monitoreo para la Cuenta 2
     if USER_2 and PASS_2:
         threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "CUENTA 2"), daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
-    
