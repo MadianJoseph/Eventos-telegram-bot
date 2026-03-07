@@ -84,7 +84,7 @@ def home():
     return "Bot Online 24/7"
 
 if __name__ == "__main__":
-    if USER_1: threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "CUENTA 1"), daemon=True).start()
-    if USER_2: threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "CUENTA 2"), daemon=True).start()
+    if USER_1: threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "Madian"), daemon=True).start()
+    if USER_2: threading.Thread(target=monitor_account, args=(USER_2, PASS_2, "Jimena"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
     
