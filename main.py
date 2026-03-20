@@ -4,7 +4,6 @@ import threading
 import os
 from datetime import datetime
 import pytz
-
 from flask import Flask
 from playwright.sync_api import sync_playwright
 
@@ -47,71 +46,76 @@ def clean_event_text(text, user_label):
     hora_actual = datetime.now(TZ).strftime("%H:%M:%S")
     return f"{resultado.strip()}\n\n🕒 _Actualizado: {hora_actual}_"
 
-# ================= LÓGICA DEL MONITOR =================
-def monitor_account(username, password, label):
-    """Monitoreo continuo 24/7"""
-    with sync_playwright() as p:
-        # Lanzamos el navegador con argumentos para estabilidad
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
-        logged = False
+# ================= LÓGICA DEL MONITOR (NUEVA ESTRUCTURA ANTI-CRASH) =================
+def run_once(username, password, label):
+    """Realiza un solo escaneo y cierra TODO para liberar RAM"""
+    try:
+        with sync_playwright() as p:
+            # Lanzamos navegador con flags de ahorro de memoria extrema
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox", 
+                    "--disable-dev-shm-usage", 
+                    "--disable-gpu",
+                    "--single-process" # Ayuda en entornos de poca RAM como Render
+                ]
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+            
+            # 1. Login
+            page.goto(URL_LOGIN, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(2000)
+            page.keyboard.press("Tab")
+            page.keyboard.type(username, delay=50)
+            page.keyboard.press("Tab")
+            page.keyboard.type(password, delay=50)
+            page.keyboard.press("Enter")
+            
+            # Esperar a que cargue el dashboard tras login
+            page.wait_for_timeout(8000)
 
-        while True:
-            try:
-                if not logged:
-                    print(f"[{datetime.now(TZ)}] {label}: Iniciando sesión...")
-                    page.goto(URL_LOGIN, wait_until="networkidle")
-                    page.wait_for_timeout(3000)
-                    
-                    # Proceso de Login
-                    page.keyboard.press("Tab")
-                    page.keyboard.type(username, delay=100)
-                    page.keyboard.press("Tab")
-                    page.keyboard.type(password, delay=100)
-                    page.keyboard.press("Enter")
-                    
-                    page.wait_for_timeout(10000)
-                    logged = True
+            # 2. Ir a Eventos
+            page.goto(URL_EVENTS, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(4000)
+            
+            content = page.inner_text("body")
 
-                # --- MONITOREO ---
-                page.goto(URL_EVENTS, wait_until="domcontentloaded")
-                page.wait_for_timeout(5000)
-                content = page.inner_text("body")
-
-                # Detectar si sacó de la sesión (ej. timeout del servidor)
-                if "ID USUARIO" in content.upper() or "INGRESE" in content.upper():
-                    print(f"[{datetime.now(TZ)}] {label}: Sesión expirada, re-logueando...")
-                    logged = False
-                    continue
-
-                # Analizar eventos
-                if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
+            # 3. Analizar
+            if NO_EVENTS_TEXT not in content and len(content.strip()) > 50:
+                # Verificar que no estemos en la pantalla de login de nuevo
+                if "ID USUARIO" not in content.upper():
                     mensaje = clean_event_text(content, label)
                     send(mensaje)
-                    # SE ELIMINÓ EL SLEEP DE 300 PARA NOTIFICAR CADA 90 SEGUNDOS
                 else:
-                    print(f"[{datetime.now(TZ)}] {label}: Sin novedades.")
+                    print(f"[{datetime.now(TZ)}] {label}: Error de sesión en este ciclo.")
+            else:
+                print(f"[{datetime.now(TZ)}] {label}: Sin novedades.")
 
-            except Exception as e:
-                print(f"Error en {label}: {e}")
-                logged = False
-                time.sleep(30) # Espera antes de reintentar tras un error
+            # 4. Cierre total
+            browser.close()
+            
+    except Exception as e:
+        print(f"[{datetime.now(TZ)}] Error crítico en ciclo de {label}: {e}")
+        # No enviamos mensaje a Telegram por cada crash para evitar spam, 
+        # el bucle simplemente reintentará en 90s.
 
-            time.sleep(CHECK_INTERVAL)
+def monitor_account(username, password, label):
+    """Bucle infinito que llama a la función de escaneo limpio"""
+    while True:
+        run_once(username, password, label)
+        time.sleep(CHECK_INTERVAL)
 
 # ================= FLASK Y HILOS =================
 @app.route("/")
 def home():
-    return f"Bot Dual Online - {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}"
+    return f"Bot Dual Online (Anti-Crash) - {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}"
 
 if __name__ == "__main__":
+    # Si usas cuentas separadas en Renders distintos, solo se activará el que tenga sus credenciales
     if USER_1 and PASS_1:
         threading.Thread(target=monitor_account, args=(USER_1, PASS_1, "MADIAN"), daemon=True).start()
     
